@@ -4,6 +4,7 @@ import os
 import asyncio
 import argparse
 import openai
+import re
 
 from rich.console import Console
 from rich.markdown import Markdown, MarkdownIt
@@ -29,6 +30,55 @@ def query_openai(data: dict):
     c.print(Markdown(content), sep)
     return content
 
+def query_openai_bypass(data: dict):
+    messages = [ systemPrompt ]
+    messages.extend(data)
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=messages
+    )
+    content = response["choices"][0]["message"]["content"]
+
+    # calculate english words and chinese words, 
+    # one chinese word is counted as two english words
+    englishwords = len(re.findall(r'\b\w+\b', content))
+    chineseWords = sum(1 for ch in content if '\u4e00' <= ch <= '\u9fff')
+    wordCount = englishwords + chineseWords*2
+
+    temperature = 1.5
+    frequencyPenalty = 1.0
+
+    extraParamsDict = {
+        (0, 250): (1.7, 2.0),
+        (251, 500): (1.5, 1.2),
+        (501, 750): (1.2, 0.6),
+        (751, 1000): (1.1, 0.5),
+        (1001, 4096): (1.0, 0.4),
+        (4097, float('inf')): (1.0, 1.0)
+    }
+
+    for wordRange, values in extraParamsDict.items():
+        if wordRange[0] < wordCount <= wordRange[1]:
+            temperature, frequencyPenalty = values
+            maxTokens = wordRange[1]
+            break
+    
+    c.print(f"[Bypass Parameters]\n \
+            initial_responsed_words: {wordCount} --> max_tokens: {maxTokens}, \
+            temperature: {temperature}, frequencyPenalty: {frequencyPenalty}\n")
+
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        max_tokens=maxTokens,
+        temperature=temperature,
+        top_p=1,
+        frequency_penalty=frequencyPenalty,
+        presence_penalty=0
+    )
+    content = response["choices"][0]["message"]["content"]
+    c.print(Markdown(content), sep)
+    return content
 
 async def query_openai_stream(data: dict):
     messages = [ systemPrompt ]
@@ -105,6 +155,7 @@ if __name__ == '__main__':
                         help="attach server response in request prompt, consume more tokens to get better results")
     parser.add_argument("-k", dest="key", help="path to api_key", default=os.path.join(baseDir, ".key"))
     parser.add_argument("-p", dest="proxy", help="http/https proxy to use")
+    parser.add_argument("-b", dest="bypass_detector", action="store_true", help="bypass the ai detector in no_stream mode")
     args = parser.parse_args()
 
     try:
@@ -124,6 +175,9 @@ if __name__ == '__main__':
         else:
             openai.proxy = args.proxy
     c.print(f"Attach response in prompt: {args.response}")
+    if args.bypass_detector:
+        stream = not stream
+        c.print(f"Bypassing ai detector: True")
     c.print(f"Stream mode: {stream}")
 
     data = []
@@ -150,6 +204,8 @@ if __name__ == '__main__':
             data.append({"role": "user", "content": content})
             if stream:
                 answer = asyncio.run(query_openai_stream(data))
+            elif args.bypass_detector:
+                answer = query_openai_bypass(data)
             else:
                 answer = query_openai(data)
         except openai.error.RateLimitError as e:
